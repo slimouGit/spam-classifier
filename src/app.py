@@ -1,27 +1,38 @@
-from predict import predict_sms
+"""
+Einfache Konsolen-Anwendung (CLI),
+mit der der Nutzer interaktiv SMS prüfen kann.
+"""
+
+from src.predict.predict import predict_sms
 
 
 def main():
+    """
+    Hauptschleife der Anwendung.
+    """
+
     print("SMS Spam Classifier")
     print("-------------------")
-    print("Gib eine SMS ein. Mit 'exit' beenden.")
-    print()
+    print("Mit 'exit' beenden.\n")
 
     while True:
+        # Nutzereingabe
         sms = input("SMS: ")
 
+        # Abbruchbedingungen
         if sms.lower() in ["exit", "quit", "q"]:
             print("App beendet.")
             break
 
         if not sms.strip():
-            print("Bitte eine SMS eingeben.")
+            print("Bitte gültigen Text eingeben.\n")
             continue
 
+        # Vorhersage durchführen
         result = predict_sms(sms)
 
-        print()
-        print("Vorhersage:", result["prediction"])
+        # Ergebnis anzeigen
+        print("\nVorhersage:", result["prediction"])
         print("Spam-Wahrscheinlichkeit:", result["spam_probability"])
         print()
 
