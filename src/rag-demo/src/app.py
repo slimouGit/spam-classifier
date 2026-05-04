@@ -2,6 +2,7 @@ import os
 from typing import List, Dict
 
 import numpy as np
+import requests
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -9,14 +10,21 @@ from sklearn.metrics.pairwise import cosine_similarity
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "llama3.2"
+
 
 def load_documents() -> List[Dict]:
     """
     Lädt alle .txt-Dateien aus dem data-Ordner.
-    Jedes Dokument wird als Dictionary gespeichert.
     """
 
     documents = []
+
+    if not os.path.exists(DATA_DIR):
+        raise FileNotFoundError(
+            f"Data-Ordner nicht gefunden: {DATA_DIR}"
+        )
 
     for filename in os.listdir(DATA_DIR):
         if filename.endswith(".txt"):
@@ -30,13 +38,15 @@ def load_documents() -> List[Dict]:
                 "text": text
             })
 
+    if not documents:
+        raise ValueError("Keine .txt-Dateien im data-Ordner gefunden.")
+
     return documents
 
 
-def chunk_text(text: str, chunk_size: int = 250) -> List[str]:
+def chunk_text(text: str, chunk_size: int = 120) -> List[str]:
     """
-    Zerlegt lange Texte in kleinere Abschnitte.
-    Bei echtem RAG ist das wichtig, damit gezielt relevante Passagen gefunden werden.
+    Zerlegt Text in kleinere Abschnitte.
     """
 
     words = text.split()
@@ -51,8 +61,7 @@ def chunk_text(text: str, chunk_size: int = 250) -> List[str]:
 
 def build_chunks(documents: List[Dict]) -> List[Dict]:
     """
-    Erstellt Chunks aus allen Dokumenten.
-    Jeder Chunk behält seine Quelle.
+    Baut Chunks aus allen Dokumenten.
     """
 
     chunks = []
@@ -67,17 +76,51 @@ def build_chunks(documents: List[Dict]) -> List[Dict]:
     return chunks
 
 
-class SimpleRAG:
+def ask_ollama(prompt: str) -> str:
     """
-    Sehr einfache RAG-Demo.
+    Sendet den Prompt an Ollama und gibt die Antwort zurück.
+    """
 
-    Retrieval:
-    - TF-IDF wandelt Texte in Zahlenvektoren um.
-    - Cosine Similarity findet ähnliche Textstellen.
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False
+    }
 
-    Generation:
-    - Die Antwort wird aus den gefundenen Textstellen zusammengesetzt.
-    - In einer echten App würde hier ein LLM stehen.
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            timeout=120
+        )
+        response.raise_for_status()
+
+    except requests.exceptions.ConnectionError:
+        raise ConnectionError(
+            "Keine Verbindung zu Ollama. Prüfe, ob Ollama läuft."
+        )
+
+    except requests.exceptions.Timeout:
+        raise TimeoutError(
+            "Ollama hat zu lange für die Antwort gebraucht."
+        )
+
+    data = response.json()
+    return data.get("response", "").strip()
+
+
+class OllamaRAG:
+    """
+    Einfache RAG-App:
+
+    1. Retrieval:
+       Sucht passende Textstellen per TF-IDF + Cosine Similarity.
+
+    2. Augmentation:
+       Übergibt die gefundenen Textstellen als Kontext an das LLM.
+
+    3. Generation:
+       Ollama erzeugt daraus eine Antwort.
     """
 
     def __init__(self, chunks: List[Dict]):
@@ -87,68 +130,91 @@ class SimpleRAG:
         self.vectorizer = TfidfVectorizer()
         self.document_vectors = self.vectorizer.fit_transform(self.texts)
 
-    def retrieve(self, question: str, top_k: int = 2) -> List[Dict]:
+    def retrieve(self, question: str, top_k: int = 3) -> List[Dict]:
         """
-        Sucht die relevantesten Textstellen zur Nutzerfrage.
+        Sucht die relevantesten Dokumentstellen zur Frage.
         """
 
         question_vector = self.vectorizer.transform([question])
-        similarities = cosine_similarity(question_vector, self.document_vectors)[0]
+        similarities = cosine_similarity(
+            question_vector,
+            self.document_vectors
+        )[0]
 
         top_indices = np.argsort(similarities)[::-1][:top_k]
 
         results = []
 
         for index in top_indices:
-            results.append({
-                "source": self.chunks[index]["source"],
-                "text": self.chunks[index]["text"],
-                "score": round(float(similarities[index]), 4)
-            })
+            score = float(similarities[index])
+
+            if score > 0:
+                results.append({
+                    "source": self.chunks[index]["source"],
+                    "text": self.chunks[index]["text"],
+                    "score": round(score, 4)
+                })
 
         return results
 
-    def generate_answer(self, question: str, retrieved_chunks: List[Dict]) -> str:
+    def build_prompt(self, question: str, retrieved_chunks: List[Dict]) -> str:
         """
-        Erzeugt eine einfache Antwort auf Basis der gefundenen Quellen.
+        Baut den Prompt für Ollama.
         """
-
-        if not retrieved_chunks or retrieved_chunks[0]["score"] == 0:
-            return "Ich habe in den Dokumenten keine passende Information gefunden."
 
         context = "\n\n".join(
-            f"- Quelle: {chunk['source']}\n  Inhalt: {chunk['text']}"
+            f"Quelle: {chunk['source']}\nText: {chunk['text']}"
             for chunk in retrieved_chunks
         )
 
-        answer = (
-            f"Frage: {question}\n\n"
-            f"Antwort auf Basis der gefundenen Dokumentstellen:\n\n"
-            f"{context}"
-        )
+        prompt = f"""
+Du bist ein sachlicher Assistent.
 
-        return answer
+Beantworte die Frage ausschließlich anhand des folgenden Kontexts.
+Wenn die Antwort nicht im Kontext steht, sage:
+"Diese Information steht nicht in den bereitgestellten Dokumenten."
 
-    def ask(self, question: str) -> str:
+Kontext:
+{context}
+
+Frage:
+{question}
+
+Antwort:
+""".strip()
+
+        return prompt
+
+    def ask(self, question: str) -> Dict:
         """
-        Kompletter RAG-Ablauf:
-        1. Frage entgegennehmen
-        2. Relevante Stellen suchen
-        3. Antwort erzeugen
+        Führt den gesamten RAG-Ablauf aus.
         """
 
         retrieved_chunks = self.retrieve(question)
-        return self.generate_answer(question, retrieved_chunks)
+
+        if not retrieved_chunks:
+            return {
+                "answer": "Ich habe keine passende Stelle in den Dokumenten gefunden.",
+                "sources": []
+            }
+
+        prompt = self.build_prompt(question, retrieved_chunks)
+        answer = ask_ollama(prompt)
+
+        return {
+            "answer": answer,
+            "sources": retrieved_chunks
+        }
 
 
 def main():
     documents = load_documents()
     chunks = build_chunks(documents)
 
-    rag = SimpleRAG(chunks)
+    rag = OllamaRAG(chunks)
 
-    print("RAG Demo")
-    print("--------")
+    print("Ollama RAG Demo")
+    print("----------------")
     print("Stelle eine Frage zu den Dokumenten.")
     print("Mit 'exit' beenden.\n")
 
@@ -163,9 +229,18 @@ def main():
             print("Bitte eine Frage eingeben.\n")
             continue
 
-        answer = rag.ask(question)
+        result = rag.ask(question)
 
-        print("\n" + answer)
+        print("\nAntwort:")
+        print(result["answer"])
+
+        print("\nQuellen:")
+        for source in result["sources"]:
+            print(
+                f"- {source['source']} "
+                f"(Score: {source['score']})"
+            )
+
         print("\n" + "-" * 50 + "\n")
 
 
