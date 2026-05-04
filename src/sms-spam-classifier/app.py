@@ -3,7 +3,7 @@ Einfache Konsolen-Anwendung (CLI),
 mit der der Nutzer interaktiv SMS prüfen kann.
 """
 
-from src.predict.predict import predict_sms
+from predict.predict import predict_sms
 
 
 def main():
